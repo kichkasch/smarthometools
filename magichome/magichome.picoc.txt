@@ -1,0 +1,151 @@
+//RGBW Lichtsteuerung mit Magic-UFO Wifi controller
+//Version 0.1 by N1ghth4wk
+//Version 0.2 by RL
+//Version 0.3 by Iksi
+//Version 0.4 by Freeride24, Mod for new version of Magic-UFO Wifi controller -> LD382A ab FW1.0.6
+//Version 0.5.1 by Kianusch
+//Version 0.5.2 by Kianusch 
+//Version 0.5.3 by Kianusch 
+//Version 0.6 by KichKasch (got rid off code for second LED)
+
+// AI1  ... (0-10V|100%) RED   | DIMMER
+// AI2  ... (0-10V|100%) GREEN | DIMMER
+// AI3  ... (0-10V|100%) BLUE  | DIMMER
+// AI4  ... (0-10V|100%) WW    | DIMMER
+// AI5  ... (0-10V|100%) CW    | DIMMER ?
+// AI6  ... Combined RGB 
+
+char* IP_ADDRESS_1 = "192.168.200.159";
+int PORT=5577;
+
+// 0=RGB + W (WHITE Value is used from AI5/AI10)
+// 1=RGB (WHITE Value is calculated from RGB | Ignored if no WHITE CHANNEL)
+char CALC_WHITE1=1;
+
+// INPUT TYPE 0-10V ..... TYPEx=10  (RGB Lichtszene or Dimmer 0-10V)
+//            0-100% .... TYPEx=100 (Dimmer 0-100%)
+char DIM_TYPE1=100;
+
+// CTRLTYPE - LD382 ............... 1
+//            LD382A ab FW1.0.6 ... 2
+//            RGB/WW/CW ........... 3
+char CTRL_TYPE1=2;
+
+char dev1[64];
+sprintf(dev1,"/dev/tcp/%s/%d",IP_ADDRESS_1,PORT);
+
+int nEvents;
+char state1[16];
+
+char *onOff1;
+
+void sendCmd(STREAM* stream, char *cmd, int len) {
+   stream_write(stream,cmd,len);
+   stream_flush(stream);
+   sleep(100);
+}
+
+void parseInput(char* dev, char *state, char *onOff, int offset) {
+      char ON=0;
+      int base=0;
+
+      // A1 = 8 0x8   | R
+      // A2 = 16 0x10 | G
+      // A3 = 32 0x20 | B
+      // A4 = 64 0x40 | WW
+      // A5 = 128 0x80 | CW
+      // A6 = 256 0x0100 | Combined RGB
+
+      for (base=0;base<5;base++) { 
+         if ((nEvents & (0x8 << (offset+base))) && (base<4 || state[12]==3)) {
+            unsigned char V = (int) ((getinput(base+offset)*255)/state[11]);
+            state[1+base]=V;
+         }
+      }
+      if (nEvents & (0x8 << (offset+base))) {
+         int rgb = (int) getinput(offset+base);
+
+         state[1] = ((rgb%1000)*255)/100;           // RED
+         state[2] = (((rgb/1000)%1000)*255)/100;    // GREEN
+         state[3] = (((rgb/1000000)%1000)*255)/100; // BLUE
+
+         // WHITE (set to brightes Value from RGB)
+         if (state[9]) {
+            state[4]=state[1];
+            if (state[2]>state[4]) {
+               state[4]=state[2];
+            }
+            if (state[3]>state[4]) {
+               state[4]=state[3];
+            }
+         }
+      }
+
+      STREAM* stream = stream_create(dev,0,0);
+
+      if (( state[1] + state[2] + state[3] + state[4] + state[5])>0) {
+         ON = 1;
+         // intro + R + G + B + W + C + 0 + termCmd
+         if (state[12] == 3) {
+            state[8]=(state[0] + state[1] + state[2] + state[3] + state[4] + state[5] + state[6] + state[7])%256;
+         } else {
+            state[7]=(state[0] + state[1] + state[2] + state[3] + state[4] + state[5] + state[6])%256;
+         }
+         sendCmd(stream,state,state[14]);
+         //printf("[MagicHome] RGB: %d %d %d %d %d %d %d %d %d %d",state[1], state[2], state[3], state[4], state[5], state[6], state[7], state[8], state[13], state[14]);
+      } else {
+         ON = 0;
+      }
+    
+      if (ON != state[10]) {
+         state[10]=ON;
+         if (ON) {
+            sendCmd(stream,onOff,state[13]);
+         } else {
+            sendCmd(stream,onOff+4,state[13]);
+         }
+      }
+
+      stream_close(stream);
+}
+
+sprintf(state1,"%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c", 0x31, 0, 0, 0, 0, 0, 0, 0, 0, CALC_WHITE1, 0, DIM_TYPE1, CTRL_TYPE1, 4, 8);
+
+char onOffShort[8];
+char onOffLong[8];
+
+// on sequence + off sequence
+sprintf(onOffShort, "%c%c%c%c%c%c%c%c", 0x71, 0x23, 0x94, 0x00, 0x71, 0x24, 0x95, 0x00);
+sprintf(onOffLong, "%c%c%c%c%c%c%c%c",  0x71, 0x23, 0x0F, 0xA3, 0x71, 0x24, 0x0F, 0xA4);
+
+onOff1=onOffLong;
+
+
+//state1[13]=4;
+//state2[13]=4;
+
+if (CTRL_TYPE1==1) {
+   onOff1=onOffShort;
+   state1[13]=3;
+}
+
+if (CTRL_TYPE1==2) {
+   state1[6]=0x0F;
+}
+
+if (CTRL_TYPE1==3) {
+   state1[7]=0x0F;
+   state1[14]=9;
+}
+
+
+// Main loop
+while(TRUE) {
+   nEvents = getinputevent();
+
+   if (nEvents & 0x01F8) {
+      parseInput(dev1, state1, onOff1, 0);
+  } else {
+      sleep (100);
+   }
+}
